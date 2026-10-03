@@ -1,7 +1,7 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   const modal = $('#adminModal'), body = $('#adminBody');
-  let csrf = '', user = null, panelTab = 'overview';
+  let csrf = '', user = null, panelTab = 'overview', pauseDeadline = 0, pauseInterval = null, pauseDismissed = false;
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const roleName = { main:'Main Admin', security:'Sicherheitsadmin', uploader:'Uploader' };
   async function api(url, options={}) {
@@ -16,6 +16,25 @@
   function toast(text) { const el=$('#toast'); el.textContent=text; el.classList.add('show'); setTimeout(()=>el.classList.remove('show'),2600); }
   function openModal() { modal.classList.remove('hidden'); document.body.style.overflow='hidden'; if(user) renderPanel(); else renderLogin(); }
   function closeModal() { modal.classList.add('hidden'); document.body.style.overflow=''; }
+  function applySiteSettings(s) {
+    if(!s) return;
+    document.documentElement.style.setProperty('--purple',s.accentColor||'#b071ed');
+    document.documentElement.style.setProperty('--purple2',s.accentColor||'#9559d9');
+    document.documentElement.dataset.theme=s.theme==='black'?'black':'violet';
+    document.querySelectorAll('[data-site-name]').forEach(el=>el.textContent=s.siteName||'Robo Uncopylocked');
+    document.querySelectorAll('[data-site-logo]').forEach(el=>{if(s.logoData)el.src=s.logoData;});
+    if(s.logoData){const icon=document.querySelector('link[rel="icon"]');if(icon)icon.href=s.logoData;}
+    document.title=`${s.siteName||'Robo Uncopylocked'} — Community Library`;
+    const meta=$('#themeColorMeta'); if(meta)meta.content=s.theme==='black'?'#070707':'#10111d';
+    const screen=$('#pauseScreen');
+    if(s.pauseActive&&s.pauseUntil&&!pauseDismissed){
+      pauseDeadline=s.pauseUntil;$('#pauseTitle').textContent=s.pauseMessage||'Kurze technische Pause';screen.classList.remove('hidden');
+      if(pauseInterval)clearInterval(pauseInterval);
+      const tick=()=>{const remaining=Math.max(0,Math.ceil((pauseDeadline-Date.now())/1000));$('#pauseCount').textContent=String(remaining);if(!remaining){screen.classList.add('hidden');clearInterval(pauseInterval);pauseInterval=null;}};
+      tick();pauseInterval=setInterval(tick,200);
+    } else {screen.classList.add('hidden');if(pauseInterval)clearInterval(pauseInterval);pauseInterval=null;}
+  }
+  async function loadSiteSettings(){try{applySiteSettings(await api('/api/site-settings'));}catch{}}
   function renderLogin(message='') {
     body.innerHTML=`<form id="loginForm" class="admin-form"><label>Benutzername<input name="username" autocomplete="username" required maxlength="24" placeholder="Admin-Benutzername"></label><label>Passwort<input name="password" type="password" autocomplete="current-password" required placeholder="Dein Passwort"></label><div class="admin-message" id="adminMessage">${esc(message)}</div><button class="button button-primary">Sicher anmelden <span>↗</span></button><p class="form-note">Zugänge werden serverseitig geprüft. Zugangsdaten werden nicht in diesem Browser gespeichert.</p></form>`;
     $('#loginForm').onsubmit=async e=>{e.preventDefault();const form=new FormData(e.currentTarget);try{const r=await api('/api/login',{method:'POST',body:JSON.stringify({username:form.get('username'),password:form.get('password')})});user=r.user;csrf=r.csrf;renderPanel();toast('Angemeldet.');}catch(err){renderLogin(err.message);}};
@@ -27,7 +46,7 @@
     if(!user) return renderLogin();
     const main=user.role==='main', security=user.role==='security';
     const tabs=[['overview','Übersicht'],['upload','Upload']];
-    if(main) tabs.push(['accounts','Konten']);
+    if(main) tabs.push(['accounts','Konten & Upload-Zugänge'],['settings','Website gestalten']);
     if(main||security) tabs.push(['review','Prüfung'],['logs','Logs']);
     if(!tabs.some(t=>t[0]===panelTab)) panelTab='overview';
     body.innerHTML=`<div class="admin-panel"><div class="admin-welcome"><div><b>${esc(user.username)}</b><small>${esc(roleName[user.role]||user.role)} · sicher angemeldet</small></div><button class="button button-quiet small" id="logoutBtn">Abmelden</button></div><div class="admin-tabs">${tabs.map(([id,label])=>`<button class="admin-tab ${panelTab===id?'active':''}" data-tab="${id}">${label}</button>`).join('')}</div><div id="panelContent"><span class="form-note">Lade Panel…</span></div></div>`;
@@ -43,9 +62,20 @@
       return;
     }
     if(panelTab==='accounts') {
-      try {const accounts=await api('/api/admin/users');content.innerHTML=`<section class="admin-section"><h3>Admin-Konto anlegen</h3><form id="accountForm" class="admin-form"><label>Benutzername<input name="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_-]+"></label><label>Passwort<input name="password" type="password" required minlength="12" autocomplete="new-password"></label><label>Rolle<select name="role"><option value="uploader">Uploader</option><option value="security">Sicherheitsadmin</option></select></label><div class="admin-message" id="accountMessage"></div><button class="button button-primary">Konto erstellen</button></form></section><section class="admin-section"><h3>Konten</h3><div class="admin-list">${accounts.map(a=>`<div class="admin-row"><span><b>${esc(a.username)}</b><small>${esc(roleName[a.role]||a.role)}</small></span><span class="role-tag ${esc(a.role)}">${esc(roleName[a.role]||a.role)}</span>${a.role==='main'?'<span class="tag">geschützt</span>':`<button class="button danger small" data-delete-user="${esc(a.username)}">Löschen</button>`}</div>`).join('')}</div></section>`;
+      try {const accounts=await api('/api/admin/users');content.innerHTML=`<section class="admin-section"><h3>Uploader-Zugang anlegen</h3><p class="admin-role-help">Uploader können sich anmelden und Bilder sowie Dateien einreichen. Sie sehen nur ihr Upload-Panel; Einsendungen werden geprüft.</p><form id="accountForm" class="admin-form"><label>Benutzername<input name="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_-]+" placeholder="z. B. creator_1"></label><label>Startpasswort<input name="password" type="password" required minlength="12" autocomplete="new-password" placeholder="Mindestens 12 Zeichen"></label><label>Kontotyp<select name="role"><option value="uploader">Uploader – nur Inhalte einreichen</option><option value="security">Sicherheitsadmin – Logs und Prüfung</option></select></label><div class="admin-message" id="accountMessage"></div><button class="button button-primary">Zugang erstellen</button></form></section><section class="admin-section"><h3>Bestehende Konten</h3><div class="admin-list">${accounts.map(a=>`<div class="admin-row"><span><b>${esc(a.username)}</b><small>${esc(roleName[a.role]||a.role)}</small></span><span class="role-tag ${esc(a.role)}">${esc(roleName[a.role]||a.role)}</span>${a.role==='main'?'<span class="tag">geschützt</span>':`<button class="button danger small" data-delete-user="${esc(a.username)}">Löschen</button>`}</div>`).join('')}</div></section>`;
         $('#accountForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({username:f.get('username'),password:f.get('password'),role:f.get('role')})});toast('Konto angelegt.');renderPanel();}catch(err){$('#accountMessage').textContent=err.message;}};
         document.querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=async()=>{if(!confirm(`Konto ${b.dataset.deleteUser} wirklich löschen?`))return;try{await api(`/api/admin/users/${encodeURIComponent(b.dataset.deleteUser)}`,{method:'DELETE'});toast('Konto gelöscht.');renderPanel();}catch(err){toast(err.message);}});
+      } catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;} return;
+    }
+    if(panelTab==='settings') {
+      try {
+        const s=await api('/api/admin/settings');
+        content.innerHTML=`<section class="admin-section"><h3>Marke und Darstellung</h3><div class="settings-preview"><img id="logoPreview" src="${s.logoData||'robo-logo.png'}" alt="Logo-Vorschau"><span><b id="namePreview">${esc(s.siteName)}</b><small>Vorschau für alle Besucher</small></span></div><form id="siteSettingsForm" class="admin-form"><div class="settings-grid"><label>Webseitenname<input name="siteName" required maxlength="48" value="${esc(s.siteName)}"></label><label>Akzentfarbe<input name="accentColor" type="color" value="${esc(s.accentColor)}"></label><label class="wide">Farbschema<select name="theme"><option value="violet" ${s.theme==='violet'?'selected':''}>Schwarz mit Lila</option><option value="black" ${s.theme==='black'?'selected':''}>Reines Schwarz</option></select></label></div><div class="admin-message" id="settingsMessage"></div><button class="button button-primary">Darstellung speichern</button></form><form id="logoForm" class="admin-form"><label>Neues Logo hochladen<input name="logo" type="file" accept="image/png,image/jpeg,image/webp,image/gif" required></label><small class="form-note">PNG, JPG, WebP oder GIF · maximal 2 MB</small><button class="button button-quiet">Logo aktualisieren</button></form></section><section class="admin-section"><h3>Kurze Pause für alle Besucher</h3><p class="settings-note">Zeigt allen Besuchern für die gewählte Zeit einen schwarzen Pausenbildschirm. Danach erscheint die Website automatisch wieder. Als Main Admin kannst du den Bildschirm mit Esc nur in deinem Browser schließen.</p><form id="pauseForm" class="admin-form"><label class="check-row"><input name="pauseActive" type="checkbox" ${s.pauseActive?'checked':''}> Kurze Pause jetzt starten</label><label>Anzeigetext<input name="pauseMessage" maxlength="120" value="${esc(s.pauseMessage)}" placeholder="Kurze technische Pause"></label><label>Dauer in Sekunden<input name="pauseSeconds" type="number" min="3" max="300" value="${s.pauseSeconds}"></label><div class="admin-message" id="pauseMessageStatus"></div><button class="button button-primary">Pauseneinstellung speichern</button></form></section>`;
+        $('#siteSettingsForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/admin/settings',{method:'PUT',body:JSON.stringify({siteName:f.get('siteName'),accentColor:f.get('accentColor'),theme:f.get('theme'),pauseActive:s.pauseActive,pauseSeconds:s.pauseSeconds,pauseMessage:s.pauseMessage})});await loadSiteSettings();toast('Website-Darstellung gespeichert.');renderPanel();}catch(err){$('#settingsMessage').textContent=err.message;}};
+        $('#siteSettingsForm').elements.siteName.oninput=e=>$('#namePreview').textContent=e.target.value||'Robo Uncopylocked';
+        $('#logoForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/admin/settings/logo',{method:'POST',body:f});await loadSiteSettings();toast('Logo aktualisiert.');renderPanel();}catch(err){$('#settingsMessage').textContent=err.message;}};
+        $('#logoForm').elements.logo.onchange=e=>{const file=e.target.files[0];if(file)$('#logoPreview').src=URL.createObjectURL(file);};
+        $('#pauseForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/admin/settings',{method:'PUT',body:JSON.stringify({siteName:s.siteName,accentColor:s.accentColor,theme:s.theme,pauseActive:f.has('pauseActive'),pauseSeconds:Number(f.get('pauseSeconds')),pauseMessage:f.get('pauseMessage')})});pauseDismissed=false;await loadSiteSettings();toast(f.has('pauseActive')?'Pause gestartet.':'Pauseneinstellung gespeichert.');renderPanel();}catch(err){$('#pauseMessageStatus').textContent=err.message;}};
       } catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;} return;
     }
     if(panelTab==='review') {
@@ -67,6 +97,6 @@
   $('#adminEntry').addEventListener('click',e=>{e.preventDefault();openModal();});
   $('#closeAdmin').addEventListener('click',closeModal);
   modal.addEventListener('click',e=>{if(e.target===modal)closeModal();});
-  document.addEventListener('keydown',e=>{if(e.key==='Escape')closeModal();});
-  (async()=>{try{const auth=await api('/api/auth');user=auth.user;csrf=auth.csrf;await refreshCounters();}catch{}await loadResources();})();
+  document.addEventListener('keydown',e=>{if(e.key==='Escape'&&user?.role==='main'&&!$('#pauseScreen').classList.contains('hidden')){pauseDismissed=true;$('#pauseScreen').classList.add('hidden');if(pauseInterval)clearInterval(pauseInterval);pauseInterval=null;return;}if(e.key==='Escape')closeModal();});
+  (async()=>{try{const auth=await api('/api/auth');user=auth.user;csrf=auth.csrf;await refreshCounters();}catch{}await loadSiteSettings();await loadResources();})();
 })();

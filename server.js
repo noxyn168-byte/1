@@ -37,7 +37,7 @@ const upload = multer({
   fileFilter: (_req, file, cb) => {
     const imageTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
     const fileTypes = ['application/zip', 'application/x-zip-compressed', 'application/octet-stream', 'model/gltf-binary', 'application/x-rbxm', 'application/x-rbxl'];
-    cb(null, file.fieldname === 'image' ? imageTypes.includes(file.mimetype) : fileTypes.includes(file.mimetype));
+    cb(null, ['image','logo'].includes(file.fieldname) ? imageTypes.includes(file.mimetype) : fileTypes.includes(file.mimetype));
   }
 });
 
@@ -60,6 +60,10 @@ async function init() {
     );
     CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
     INSERT INTO app_settings(key,value) VALUES ('visitors','0') ON CONFLICT (key) DO NOTHING;
+    INSERT INTO app_settings(key,value) VALUES
+      ('site_name','Robo Uncopylocked'),('accent_color','#b071ed'),('site_theme','violet'),
+      ('logo_data',''),('pause_until',''),('pause_message','Kurze technische Pause'),('pause_seconds','3')
+      ON CONFLICT (key) DO NOTHING;
   `);
   const { rows } = await pool.query('SELECT count(*)::int AS n FROM app_users');
   const name = process.env.BOOTSTRAP_ADMIN_USERNAME || 'admin';
@@ -118,6 +122,14 @@ app.post('/api/visit', async (req,res,next) => {
     }
     const {rows}=await pool.query("SELECT value FROM app_settings WHERE key='visitors'");
     res.json({visitors:Number(rows[0]?.value||0)});
+  } catch(err) { next(err); }
+});
+app.get('/api/site-settings', async (_req,res,next) => {
+  try {
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','pause_until','pause_message','pause_seconds')");
+    const settings=Object.fromEntries(rows.map(r=>[r.key,r.value]));
+    const until=Date.parse(settings.pause_until||'');
+    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoData:settings.logo_data||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3});
   } catch(err) { next(err); }
 });
 app.get('/api/resources', async (_req,res,next) => {
@@ -193,6 +205,43 @@ app.delete('/api/admin/resources/:id', requireRole('main'), requireCsrf, async (
 app.post('/api/admin/visitors', requireRole('main'), requireCsrf, async (req,res,next) => {
   try { const n=Number(req.body.value); if(!Number.isSafeInteger(n)||n<0||n>2147483647) return res.status(400).json({error:'Bitte eine Besucherzahl zwischen 0 und 2.147.483.647 eingeben.'}); await pool.query("UPDATE app_settings SET value=$1 WHERE key='visitors'",[String(n)]); await logEvent(currentUser(req).username,'Besucherzahl angepasst',String(n)); res.json({visitors:n}); }
   catch(err){next(err);}
+});
+app.get('/api/admin/settings', requireRole('main'), async (_req,res,next) => {
+  try {
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','pause_until','pause_message','pause_seconds')");
+    const s=Object.fromEntries(rows.map(r=>[r.key,r.value]));
+    const until=Date.parse(s.pause_until||'');
+    res.json({siteName:s.site_name||'Robo Uncopylocked',accentColor:s.accent_color||'#b071ed',theme:s.site_theme==='black'?'black':'violet',hasLogo:Boolean(s.logo_data),logoData:s.logo_data||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseSeconds:Number(s.pause_seconds)||3,pauseMessage:s.pause_message||'Kurze technische Pause'});
+  } catch(err) { next(err); }
+});
+app.put('/api/admin/settings', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try {
+    const siteName=String(req.body.siteName||'').trim().slice(0,48);
+    const accentColor=String(req.body.accentColor||'').trim();
+    const theme=String(req.body.theme||'violet');
+    const pauseMessage=String(req.body.pauseMessage||'Kurze technische Pause').trim().slice(0,120);
+    const pauseSeconds=Number(req.body.pauseSeconds);
+    const pauseActive=req.body.pauseActive===true;
+    if(!siteName) return res.status(400).json({error:'Bitte einen Webseitennamen eingeben.'});
+    if(!/^#[0-9a-fA-F]{6}$/.test(accentColor)) return res.status(400).json({error:'Bitte eine gültige Akzentfarbe wählen.'});
+    if(!['violet','black'].includes(theme)) return res.status(400).json({error:'Ungültiges Farbdesign.'});
+    if(!Number.isInteger(pauseSeconds)||pauseSeconds<3||pauseSeconds>300) return res.status(400).json({error:'Die Pause muss zwischen 3 und 300 Sekunden dauern.'});
+    const until=pauseActive?new Date(Date.now()+pauseSeconds*1000).toISOString():'';
+    const values={site_name:siteName,accent_color:accentColor,site_theme:theme,pause_until:until,pause_message:pauseMessage||'Kurze technische Pause',pause_seconds:String(pauseSeconds)};
+    await Promise.all(Object.entries(values).map(([key,value])=>pool.query('INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value',[key,value])));
+    await logEvent(currentUser(req).username,'Webseite angepasst',`${siteName} · ${theme} · Pause ${pauseActive?'gestartet':'aus'}`);
+    res.json({ok:true,pauseUntil:pauseActive?Date.parse(until):null});
+  } catch(err) { next(err); }
+});
+app.post('/api/admin/settings/logo', requireRole('main'), requireCsrf, upload.single('logo'), async (req,res,next) => {
+  try {
+    if(!req.file) return res.status(400).json({error:'Bitte ein Bild auswählen.'});
+    if(req.file.size>2*1024*1024) return res.status(400).json({error:'Das Logo darf höchstens 2 MB groß sein.'});
+    const logoData=`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_data',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoData]);
+    await logEvent(currentUser(req).username,'Webseitenlogo geändert',req.file.originalname.slice(0,120));
+    res.json({ok:true});
+  } catch(err) { next(err); }
 });
 
 app.use(express.static(__dirname,{index:'index.html',maxAge:0}));

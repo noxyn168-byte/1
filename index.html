@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width,initial-scale=1">
-  <meta name="theme-color" content="#10111d">
+  <meta name="theme-color" content="#10111d" id="themeColorMeta">
   <meta name="referrer" content="strict-origin-when-cross-origin">
   <script>if(location.hostname==='robo-uncopylocked-preview.onrender.com'){location.replace('https://robo-uncopylocked.onrender.com'+location.pathname+location.search+location.hash)}</script>
   <title>Robo Uncopylocked — Community Library</title>
@@ -17,7 +17,7 @@
 </head>
 <body>
   <header class="topbar">
-    <a class="brand" href="#top"><img class="brand-mark" src="robo-logo.png" alt=""><span><b>ROBO UNCOPYLOCKED</b><small>COMMUNITY LIBRARY</small></span></a>
+    <a class="brand" href="#top"><img class="brand-mark" data-site-logo src="robo-logo.png" alt=""><span><b data-site-name>ROBO UNCOPYLOCKED</b><small>COMMUNITY LIBRARY</small></span></a>
     <nav aria-label="Hauptnavigation"><a class="navlink active" href="#library">Library</a><a class="navlink" href="#categories">Kategorien</a><a class="navlink" href="#about">Über uns</a></nav>
     <div class="header-actions"><a class="admin-entry" href="#admin" id="adminEntry">Admin-Panel <span>↗</span></a></div>
   </header>
@@ -29,11 +29,12 @@
     </section>
     <section class="stat-strip" id="categories"><div><b id="resourceCount">00</b><span>Ressourcen</span></div><div><b>04</b><span>Kategorien</span></div><div><b>100%</b><span>Community made</span></div><div><b id="visitorCount">—</b><span>Besucher</span></div><div class="strip-note">Ein guter Fund. Ein besseres nächstes Projekt. <span>→</span></div></section>
     <section class="catalog" id="library"><div class="section-head"><div><div class="eyebrow muted">FÜR DEIN NÄCHSTES PROJEKT</div><h2>Die Library</h2></div></div><div class="resource-grid" id="resourceGrid"></div><div class="preview-empty" id="emptyState"><span>✦</span><h3>Neue Ressourcen folgen bald</h3><p>Veröffentlichte Inhalte erscheinen hier.</p></div></section>
-    <section class="preview-about" id="about"><div class="banner-star">✳</div><div><div class="eyebrow">ROBO UNCOPYLOCKED</div><h2>Eine Library für kreative Projekte.</h2><p>Teile nur Inhalte, an denen du die nötigen Rechte besitzt. Credits und Nutzungshinweise gehören dazu.</p></div></section>
-    <footer><a class="brand footer-brand" href="#top"><img class="brand-mark" src="robo-logo.png" alt=""><span><b>ROBO UNCOPYLOCKED</b><small>COMMUNITY LIBRARY</small></span></a><p>Respektiere Urheberrechte und die Arbeit anderer Creator.</p><span>© 2026 Robo Uncopylocked</span></footer>
+    <section class="preview-about" id="about"><div class="banner-star">✳</div><div><div class="eyebrow" data-site-name>ROBO UNCOPYLOCKED</div><h2>Eine Library für kreative Projekte.</h2><p>Teile nur Inhalte, an denen du die nötigen Rechte besitzt. Credits und Nutzungshinweise gehören dazu.</p></div></section>
+    <footer><a class="brand footer-brand" href="#top"><img class="brand-mark" data-site-logo src="robo-logo.png" alt=""><span><b data-site-name>ROBO UNCOPYLOCKED</b><small>COMMUNITY LIBRARY</small></span></a><p>Respektiere Urheberrechte und die Arbeit anderer Creator.</p><span>© 2026 <span data-site-name>Robo Uncopylocked</span></span></footer>
   </main>
+  <div class="pause-screen hidden" id="pauseScreen" aria-live="assertive"><div class="pause-card"><div class="pause-mark">◌</div><p class="eyebrow">KURZE UNTERBRECHUNG</p><h1 id="pauseTitle">Kurze technische Pause</h1><p>Die Website ist gleich wieder für alle da.</p><div class="pause-count" id="pauseCount">3</div><small>Sekunden bis zur Fortsetzung</small></div></div>
   <div class="modal-backdrop hidden" id="adminModal" role="presentation"><section class="modal" role="dialog" aria-modal="true" aria-labelledby="adminTitle"><div class="modal-head"><div><h2 id="adminTitle">Admin-Panel</h2><p>Sicher anmelden, Inhalte und Konten verwalten.</p></div><button class="close-btn" id="closeAdmin" aria-label="Schließen">×</button></div><div id="adminBody"></div></section></div>
   <div class="toast" id="toast" role="status"></div>
-  <script src="admin.js?v=2" defer></script>
+  <script src="admin.js?v=3" defer></script>
 </body>
 </html>
