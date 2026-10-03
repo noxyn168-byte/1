@@ -63,7 +63,7 @@
   async function loadResources() {
     try {const resources=await api('/api/resources');$('#resourceCount').textContent=String(resources.length).padStart(2,'0');$('#emptyState').classList.toggle('hidden',resources.length>0);$('#resourceGrid').innerHTML=resources.map(r=>`<article class="resource-card"><div class="card-image">${r.hasImage?`<img src="/api/resources/${encodeURIComponent(r.id)}/image" alt="${esc(r.title)}">`:'<div class="image-placeholder theme-violet"><span class="placeholder-icon">✦</span></div>'}<span class="badge category">${esc(r.category)}</span></div><div class="card-body"><div class="card-topline"><h3>${esc(r.title)}</h3></div><p class="card-description">${esc(r.description)}</p><div class="card-foot"><span>von <b class="author">${esc(r.author)}</b></span>${r.hasFile?`<a class="button button-quiet small" href="/api/resources/${encodeURIComponent(r.id)}/download">↓ Download (${Number(r.downloads).toLocaleString('de-DE')})</a>`:`<span class="download-count">Bildvorschau</span>`}</div></div></article>`).join('');} catch {}
   }
-  async function refreshCounters() {try{const d=await api('/api/visit');$('#visitorCount').textContent=Number(d.visitors).toLocaleString('de-DE');}catch{}}
+  async function refreshCounters() {try{const d=await api('/api/visit',{method:'POST',body:'{}'});$('#visitorCount').textContent=Number(d.visitors).toLocaleString('de-DE');}catch{}}
   $('#adminEntry').addEventListener('click',e=>{e.preventDefault();openModal();});
   $('#closeAdmin').addEventListener('click',closeModal);
   modal.addEventListener('click',e=>{if(e.target===modal)closeModal();});
