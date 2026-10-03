@@ -18,12 +18,16 @@
   function closeModal() { modal.classList.add('hidden'); document.body.style.overflow=''; }
   function applySiteSettings(s) {
     if(!s) return;
-    document.documentElement.style.setProperty('--purple',s.accentColor||'#b071ed');
-    document.documentElement.style.setProperty('--purple2',s.accentColor||'#9559d9');
+    const accent=s.accentColor||'#b071ed';
+    document.documentElement.style.setProperty('--purple',accent);
+    document.documentElement.style.setProperty('--purple2',`color-mix(in srgb, ${accent} 74%, #171321)`);
+    document.documentElement.style.setProperty('--brand-glow',`color-mix(in srgb, ${accent} 22%, transparent)`);
+    document.documentElement.style.setProperty('--brand-line',`color-mix(in srgb, ${accent} 35%, #30334a)`);
     document.documentElement.dataset.theme=s.theme==='black'?'black':'violet';
     document.querySelectorAll('[data-site-name]').forEach(el=>el.textContent=s.siteName||'Robo Uncopylocked');
-    document.querySelectorAll('[data-site-logo]').forEach(el=>{if(s.logoData)el.src=s.logoData;});
-    if(s.logoData){const icon=document.querySelector('link[rel="icon"]');if(icon)icon.href=s.logoData;}
+    const logo=s.logoHash?`/api/site-logo?v=${encodeURIComponent(s.logoHash)}`:'robo-logo.png';
+    document.querySelectorAll('[data-site-logo]').forEach(el=>{el.src=logo;});
+    const icon=document.querySelector('link[rel="icon"]');if(icon)icon.href=logo;
     document.title=`${s.siteName||'Robo Uncopylocked'} — Community Library`;
     const meta=$('#themeColorMeta'); if(meta)meta.content=s.theme==='black'?'#070707':'#10111d';
     const screen=$('#pauseScreen');
@@ -62,9 +66,9 @@
       return;
     }
     if(panelTab==='accounts') {
-      try {const accounts=await api('/api/admin/users');content.innerHTML=`<section class="admin-section"><h3>Uploader-Zugang anlegen</h3><p class="admin-role-help">Uploader können sich anmelden und Bilder sowie Dateien einreichen. Sie sehen nur ihr Upload-Panel; Einsendungen werden geprüft.</p><form id="accountForm" class="admin-form"><label>Benutzername<input name="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_-]+" placeholder="z. B. creator_1"></label><label>Startpasswort<input name="password" type="password" required minlength="12" autocomplete="new-password" placeholder="Mindestens 12 Zeichen"></label><label>Kontotyp<select name="role"><option value="uploader">Uploader – nur Inhalte einreichen</option><option value="security">Sicherheitsadmin – Logs und Prüfung</option></select></label><div class="admin-message" id="accountMessage"></div><button class="button button-primary">Zugang erstellen</button></form></section><section class="admin-section"><h3>Bestehende Konten</h3><div class="admin-list">${accounts.map(a=>`<div class="admin-row"><span><b>${esc(a.username)}</b><small>${esc(roleName[a.role]||a.role)}</small></span><span class="role-tag ${esc(a.role)}">${esc(roleName[a.role]||a.role)}</span>${a.role==='main'?'<span class="tag">geschützt</span>':`<button class="button danger small" data-delete-user="${esc(a.username)}">Löschen</button>`}</div>`).join('')}</div></section>`;
+      try {const accounts=await api('/api/admin/users');content.innerHTML=`<section class="admin-section"><h3>Admin- oder Uploader-Zugang anlegen</h3><p class="admin-role-help">Uploader reichen Bilder und Dateien ein. Sicherheitsadmins sehen Logs und Prüfungen. Main Admins erhalten alle Rechte und können weitere Konten verwalten.</p><form id="accountForm" class="admin-form"><label>Benutzername<input name="username" required minlength="3" maxlength="24" pattern="[A-Za-z0-9_-]+" placeholder="z. B. creator_1"></label><label>Startpasswort<input name="password" type="password" required minlength="12" autocomplete="new-password" placeholder="Mindestens 12 Zeichen"></label><label>Kontotyp<select name="role"><option value="uploader">Uploader – nur Inhalte einreichen</option><option value="security">Sicherheitsadmin – Logs und Prüfung</option><option value="main">Main Admin – alle Rechte</option></select></label><div class="admin-message" id="accountMessage"></div><button class="button button-primary">Zugang erstellen</button></form></section><section class="admin-section"><h3>Bestehende Konten</h3><div class="admin-list">${accounts.map(a=>`<div class="admin-row"><span><b>${esc(a.username)}</b><small>${esc(roleName[a.role]||a.role)}</small></span><span class="role-tag ${esc(a.role)}">${esc(roleName[a.role]||a.role)}</span>${a.username.toLowerCase()===user.username.toLowerCase()?'<span class="tag">dein Konto</span>':`<button class="button danger small" data-delete-user="${esc(a.username)}">Löschen</button>`}</div>`).join('')}</div></section>`;
         $('#accountForm').onsubmit=async e=>{e.preventDefault();const f=new FormData(e.currentTarget);try{await api('/api/admin/users',{method:'POST',body:JSON.stringify({username:f.get('username'),password:f.get('password'),role:f.get('role')})});toast('Konto angelegt.');renderPanel();}catch(err){$('#accountMessage').textContent=err.message;}};
-        document.querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=async()=>{if(!confirm(`Konto ${b.dataset.deleteUser} wirklich löschen?`))return;try{await api(`/api/admin/users/${encodeURIComponent(b.dataset.deleteUser)}`,{method:'DELETE'});toast('Konto gelöscht.');renderPanel();}catch(err){toast(err.message);}});
+        document.querySelectorAll('[data-delete-user]').forEach(b=>b.onclick=async()=>{if(!confirm(`Konto ${b.dataset.deleteUser} und alle aktiven Anmeldungen wirklich entfernen?`))return;try{const r=await api(`/api/admin/users/${encodeURIComponent(b.dataset.deleteUser)}`,{method:'DELETE'});toast(r.sessionsEnded?'Konto gelöscht und abgemeldet.':'Konto gelöscht.');renderPanel();}catch(err){toast(err.message);}});
       } catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;} return;
     }
     if(panelTab==='settings') {
@@ -98,5 +102,5 @@
   $('#closeAdmin').addEventListener('click',closeModal);
   modal.addEventListener('click',e=>{if(e.target===modal)closeModal();});
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&user?.role==='main'&&!$('#pauseScreen').classList.contains('hidden')){pauseDismissed=true;$('#pauseScreen').classList.add('hidden');if(pauseInterval)clearInterval(pauseInterval);pauseInterval=null;return;}if(e.key==='Escape')closeModal();});
-  (async()=>{try{const auth=await api('/api/auth');user=auth.user;csrf=auth.csrf;await refreshCounters();}catch{}await loadSiteSettings();await loadResources();setInterval(()=>{if(!document.hidden)loadSiteSettings();},1200);})();
+  (async()=>{try{const auth=await api('/api/auth');user=auth.user;csrf=auth.csrf;await refreshCounters();}catch{}await loadSiteSettings();await loadResources();setInterval(async()=>{if(document.hidden)return;await loadSiteSettings();try{const auth=await api('/api/auth');if(user&&!auth.user){user=null;csrf=auth.csrf;openModal();renderLogin('Dieses Konto wurde entfernt und abgemeldet.');toast('Konto entfernt · Sitzung beendet.');}}catch{}},1800);})();
 })();

@@ -62,7 +62,7 @@ async function init() {
     INSERT INTO app_settings(key,value) VALUES ('visitors','0') ON CONFLICT (key) DO NOTHING;
     INSERT INTO app_settings(key,value) VALUES
       ('site_name','Robo Uncopylocked'),('accent_color','#b071ed'),('site_theme','violet'),
-      ('logo_data',''),('pause_until',''),('pause_message','Kurze technische Pause'),('pause_seconds','3')
+      ('logo_data',''),('logo_hash',''),('pause_until',''),('pause_message','Kurze technische Pause'),('pause_seconds','3')
       ON CONFLICT (key) DO NOTHING;
   `);
   const { rows } = await pool.query('SELECT count(*)::int AS n FROM app_users');
@@ -126,10 +126,27 @@ app.post('/api/visit', async (req,res,next) => {
 });
 app.get('/api/site-settings', async (_req,res,next) => {
   try {
-    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','pause_until','pause_message','pause_seconds')");
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_hash','pause_until','pause_message','pause_seconds')");
     const settings=Object.fromEntries(rows.map(r=>[r.key,r.value]));
     const until=Date.parse(settings.pause_until||'');
-    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoData:settings.logo_data||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3});
+    let logoHash=settings.logo_hash||'';
+    if(!logoHash) {
+      const legacy=await pool.query("SELECT value FROM app_settings WHERE key='logo_data'");
+      if(legacy.rows[0]?.value) {
+        logoHash=crypto.createHash('sha256').update(legacy.rows[0].value).digest('hex').slice(0,16);
+        await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_hash',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoHash]);
+      }
+    }
+    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoHash,pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3});
+  } catch(err) { next(err); }
+});
+app.get('/api/site-logo', async (_req,res,next) => {
+  try {
+    const {rows}=await pool.query("SELECT value FROM app_settings WHERE key='logo_data'");
+    const match=/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(rows[0]?.value||'');
+    if(!match) return res.redirect('/robo-logo.png');
+    const hash=crypto.createHash('sha256').update(rows[0].value).digest('hex').slice(0,16);
+    res.set('Cache-Control','public,max-age=3600').set('ETag',`"${hash}"`).type(match[1]).send(Buffer.from(match[2],'base64'));
   } catch(err) { next(err); }
 });
 app.get('/api/resources', async (_req,res,next) => {
@@ -178,19 +195,32 @@ app.post('/api/admin/users', requireRole('main'), requireCsrf, async (req,res,ne
     const username=String(req.body.username||'').trim(), password=String(req.body.password||''), role=String(req.body.role||'uploader');
     if(!/^[A-Za-z0-9_-]{3,24}$/.test(username)) return res.status(400).json({error:'Name: 3–24 Zeichen, Buchstaben, Zahlen, _ oder -.'});
     if(password.length<12) return res.status(400).json({error:'Das Passwort muss mindestens 12 Zeichen haben.'});
-    if(!['security','uploader'].includes(role)) return res.status(400).json({error:'Diese Rolle kann hier nicht vergeben werden.'});
+    if(!['main','security','uploader'].includes(role)) return res.status(400).json({error:'Diese Rolle kann hier nicht vergeben werden.'});
     const hash=await bcrypt.hash(password,12); const {rows}=await pool.query('INSERT INTO app_users(username,password_hash,role) VALUES($1,$2,$3) RETURNING username,role,created_at',[username,hash,role]);
     await logEvent(currentUser(req).username,'Konto erstellt',`${username} · ${role}`); res.status(201).json(publicUser(rows[0]));
   } catch(err) { if(err.code==='23505') return res.status(409).json({error:'Dieser Nutzername ist schon vergeben.'}); next(err); }
 });
 app.delete('/api/admin/users/:username', requireRole('main'), requireCsrf, async (req,res,next) => {
+  const name=String(req.params.username||'');
+  if(name.toLowerCase()===String(currentUser(req).username).toLowerCase()) return res.status(400).json({error:'Das eigene Konto kann nicht gelöscht werden.'});
+  const client=await pool.connect();
   try {
-    const name=req.params.username;
-    if(name===currentUser(req).username) return res.status(400).json({error:'Das eigene Main-Admin-Konto kann hier nicht gelöscht werden.'});
-    const {rowCount}=await pool.query("DELETE FROM app_users WHERE username=$1 AND role <> 'main'",[name]);
-    if(!rowCount) return res.status(404).json({error:'Konto nicht gefunden oder geschützt.'});
-    await logEvent(currentUser(req).username,'Konto gelöscht',name,'warning'); res.json({ok:true});
-  } catch(err) { next(err); }
+    await client.query('BEGIN');
+    const found=await client.query('SELECT id,username,role FROM app_users WHERE lower(username)=lower($1) FOR UPDATE',[name]);
+    if(!found.rows[0]) { await client.query('ROLLBACK'); return res.status(404).json({error:'Konto nicht gefunden.'}); }
+    const account=found.rows[0];
+    if(account.role==='main') {
+      await client.query('SELECT pg_advisory_xact_lock(714255,1)');
+      const {rows}=await client.query("SELECT count(*)::int AS n FROM app_users WHERE role='main'");
+      if(rows[0].n<=1) { await client.query('ROLLBACK'); return res.status(400).json({error:'Das letzte Main-Admin-Konto muss bestehen bleiben.'}); }
+    }
+    await client.query("DELETE FROM web_sessions WHERE sess->'user'->>'id'=$1 OR lower(sess->'user'->>'username')=lower($2)",[String(account.id),account.username]);
+    await client.query('DELETE FROM app_users WHERE id=$1',[account.id]);
+    await client.query('COMMIT');
+    await logEvent(currentUser(req).username,'Konto gelöscht',`${account.username} · alle Sitzungen beendet`,'warning');
+    res.json({ok:true,sessionsEnded:true});
+  } catch(err) { try{await client.query('ROLLBACK');}catch{} next(err); }
+  finally { client.release(); }
 });
 app.get('/api/admin/logs', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 200'); res.json(rows); } catch(err){next(err);} });
 app.get('/api/admin/resources', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT * FROM resources ORDER BY created_at DESC LIMIT 200'); res.json(rows.map(safeResource)); } catch(err){next(err);} });
@@ -238,7 +268,9 @@ app.post('/api/admin/settings/logo', requireRole('main'), requireCsrf, upload.si
     if(!req.file) return res.status(400).json({error:'Bitte ein Bild auswählen.'});
     if(req.file.size>2*1024*1024) return res.status(400).json({error:'Das Logo darf höchstens 2 MB groß sein.'});
     const logoData=`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    const logoHash=crypto.createHash('sha256').update(logoData).digest('hex').slice(0,16);
     await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_data',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoData]);
+    await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_hash',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoHash]);
     await logEvent(currentUser(req).username,'Webseitenlogo geändert',req.file.originalname.slice(0,120));
     res.json({ok:true});
   } catch(err) { next(err); }
