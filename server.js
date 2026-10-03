@@ -195,7 +195,7 @@ app.post('/api/admin/visitors', requireRole('main'), requireCsrf, async (req,res
   catch(err){next(err);}
 });
 
-app.use(express.static(__dirname,{index:'index.html',maxAge:'1h'}));
+app.use(express.static(__dirname,{index:'index.html',maxAge:0}));
 app.use('/api',(_req,res)=>res.status(404).json({error:'API-Endpunkt nicht gefunden.'}));
 app.use((err,_req,res,_next)=>{
   console.error(err.message);
