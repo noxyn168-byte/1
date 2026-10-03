@@ -1,0 +1,201 @@
+const path = require('node:path');
+const crypto = require('node:crypto');
+const express = require('express');
+const session = require('express-session');
+const PgSession = require('connect-pg-simple')(session);
+const { Pool } = require('pg');
+const bcrypt = require('bcryptjs');
+const multer = require('multer');
+const helmet = require('helmet');
+const { rateLimit } = require('express-rate-limit');
+
+const app = express();
+const port = Number(process.env.PORT || 10000);
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  ssl: process.env.DATABASE_URL?.includes('render.com') ? { rejectUnauthorized: false } : undefined,
+  max: 5,
+  idleTimeoutMillis: 30000
+});
+
+app.set('trust proxy', 1);
+app.disable('x-powered-by');
+app.use(helmet({ contentSecurityPolicy: false, crossOriginEmbedderPolicy: false }));
+app.use(express.json({ limit: '200kb' }));
+app.use(session({
+  store: new PgSession({ pool, tableName: 'web_sessions', createTableIfMissing: true }),
+  name: 'robo.sid',
+  secret: process.env.SESSION_SECRET,
+  resave: false,
+  saveUninitialized: false,
+  cookie: { httpOnly: true, secure: 'auto', sameSite: 'lax', maxAge: 12 * 60 * 60 * 1000 }
+}));
+
+const upload = multer({
+  storage: multer.memoryStorage(),
+  limits: { fileSize: 20 * 1024 * 1024, files: 2, fields: 8 },
+  fileFilter: (_req, file, cb) => {
+    const imageTypes = ['image/png', 'image/jpeg', 'image/webp', 'image/gif'];
+    const fileTypes = ['application/zip', 'application/x-zip-compressed', 'application/octet-stream', 'model/gltf-binary', 'application/x-rbxm', 'application/x-rbxl'];
+    cb(null, file.fieldname === 'image' ? imageTypes.includes(file.mimetype) : fileTypes.includes(file.mimetype));
+  }
+});
+
+async function init() {
+  if (!process.env.DATABASE_URL || !process.env.SESSION_SECRET || !process.env.BOOTSTRAP_ADMIN_PASSWORD) throw new Error('Missing required server configuration');
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS app_users (
+      id BIGSERIAL PRIMARY KEY, username VARCHAR(24) NOT NULL UNIQUE,
+      password_hash TEXT NOT NULL, role VARCHAR(16) NOT NULL CHECK (role IN ('main','security','uploader')),
+      created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS resources (
+      id UUID PRIMARY KEY, title TEXT NOT NULL, description TEXT NOT NULL DEFAULT '', category TEXT NOT NULL DEFAULT 'Tools',
+      author TEXT NOT NULL, image_data BYTEA, image_type TEXT, file_data BYTEA, file_name TEXT, file_type TEXT,
+      downloads BIGINT NOT NULL DEFAULT 0, status VARCHAR(16) NOT NULL DEFAULT 'pending', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS activity_logs (
+      id BIGSERIAL PRIMARY KEY, username TEXT NOT NULL, action TEXT NOT NULL, detail TEXT NOT NULL DEFAULT '',
+      level TEXT NOT NULL DEFAULT 'info', created_at TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE TABLE IF NOT EXISTS app_settings (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+    INSERT INTO app_settings(key,value) VALUES ('visitors','0') ON CONFLICT (key) DO NOTHING;
+  `);
+  const { rows } = await pool.query('SELECT count(*)::int AS n FROM app_users');
+  if (rows[0].n === 0) {
+    const name = process.env.BOOTSTRAP_ADMIN_USERNAME || 'admin';
+    const hash = await bcrypt.hash(process.env.BOOTSTRAP_ADMIN_PASSWORD, 12);
+    await pool.query('INSERT INTO app_users(username,password_hash,role) VALUES ($1,$2,$3)', [name, hash, 'main']);
+    await logEvent(name, 'Main Admin angelegt', 'Erster sicherer Serverstart');
+  }
+}
+
+async function logEvent(username, action, detail = '', level = 'info') {
+  await pool.query('INSERT INTO activity_logs(username,action,detail,level) VALUES ($1,$2,$3,$4)', [String(username).slice(0,80), String(action).slice(0,120), String(detail).slice(0,500), level]);
+}
+function currentUser(req) { return req.session.user || null; }
+function requireAuth(req, res, next) { if (!currentUser(req)) return res.status(401).json({ error: 'Bitte zuerst anmelden.' }); next(); }
+function requireRole(...roles) { return (req,res,next) => !currentUser(req) ? res.status(401).json({error:'Bitte zuerst anmelden.'}) : !roles.includes(currentUser(req).role) ? res.status(403).json({error:'Keine Berechtigung.'}) : next(); }
+function requireCsrf(req,res,next) { if (!req.session.csrf || req.get('x-csrf-token') !== req.session.csrf) return res.status(403).json({error:'Sitzung abgelaufen. Bitte Seite neu laden.'}); next(); }
+function publicUser(row) { return { username: row.username, role: row.role, createdAt: row.created_at }; }
+function safeResource(row) { return { id: row.id, title: row.title, description: row.description, category: row.category, author: row.author, downloads: Number(row.downloads), status: row.status, createdAt: row.created_at, hasImage: Boolean(row.image_data), hasFile: Boolean(row.file_data) }; }
+
+app.get('/api/auth', (req,res) => {
+  if (!req.session.csrf) req.session.csrf = crypto.randomBytes(24).toString('hex');
+  res.json({ user: currentUser(req), csrf: req.session.csrf });
+});
+app.post('/api/login', rateLimit({ windowMs: 15 * 60 * 1000, limit: 10, standardHeaders: true, legacyHeaders: false }), requireCsrf, async (req,res,next) => {
+  try {
+    const username = String(req.body.username || '').trim();
+    const { rows } = await pool.query('SELECT * FROM app_users WHERE lower(username)=lower($1)', [username]);
+    const row = rows[0];
+    if (!row || !(await bcrypt.compare(String(req.body.password || ''), row.password_hash))) {
+      await logEvent(username || 'unbekannt', 'Anmeldung fehlgeschlagen', 'Ungültige Zugangsdaten', 'warning');
+      return res.status(401).json({ error: 'Benutzername oder Passwort stimmt nicht.' });
+    }
+    await new Promise((resolve,reject) => req.session.regenerate(err => err ? reject(err) : resolve()));
+    req.session.user = { id: row.id, username: row.username, role: row.role };
+    req.session.csrf = crypto.randomBytes(24).toString('hex');
+    await logEvent(row.username, 'Anmeldung', 'Erfolgreicher Login');
+    req.session.save(err => err ? next(err) : res.json({ user: req.session.user, csrf: req.session.csrf }));
+  } catch (err) { next(err); }
+});
+app.post('/api/logout', requireAuth, requireCsrf, async (req,res,next) => {
+  try { const u=currentUser(req); await logEvent(u.username,'Abmeldung'); req.session.destroy(err => err ? next(err) : res.clearCookie('robo.sid').json({ok:true})); }
+  catch(err) { next(err); }
+});
+
+app.post('/api/visit', async (req,res,next) => {
+  try {
+    if (!req.session.countedVisit) {
+      await pool.query("UPDATE app_settings SET value=(value::bigint+1)::text WHERE key='visitors'");
+      req.session.countedVisit = true;
+    }
+    const {rows}=await pool.query("SELECT value FROM app_settings WHERE key='visitors'");
+    res.json({visitors:Number(rows[0]?.value||0)});
+  } catch(err) { next(err); }
+});
+app.get('/api/resources', async (_req,res,next) => {
+  try { const {rows}=await pool.query("SELECT * FROM resources WHERE status='published' ORDER BY created_at DESC"); res.json(rows.map(safeResource)); }
+  catch(err) { next(err); }
+});
+app.get('/api/resources/:id/image', async (req,res,next) => {
+  try { const {rows}=await pool.query('SELECT image_data,image_type FROM resources WHERE id=$1',[req.params.id]); if(!rows[0]?.image_data) return res.sendStatus(404); res.type(rows[0].image_type).set('Cache-Control','public,max-age=3600').send(rows[0].image_data); }
+  catch(err) { next(err); }
+});
+app.get('/api/resources/:id/download', async (req,res,next) => {
+  try {
+    const {rows}=await pool.query("UPDATE resources SET downloads=downloads+1 WHERE id=$1 AND status='published' RETURNING file_data,file_type,file_name,title,author",[req.params.id]);
+    if(!rows[0]?.file_data) return res.status(404).send('Datei nicht gefunden.');
+    await logEvent(currentUser(req)?.username || 'Besucher','Download',rows[0].title);
+    const filename=String(rows[0].file_name||`${rows[0].title}.zip`).replace(/[^A-Za-z0-9_. -]/g,'_').slice(0,120);
+    res.set('Content-Type',rows[0].file_type||'application/octet-stream').set('Content-Disposition',`attachment; filename="${filename}"`).send(rows[0].file_data);
+  } catch(err) { next(err); }
+});
+app.post('/api/resources', requireAuth, requireCsrf, upload.fields([{name:'image',maxCount:1},{name:'downloadFile',maxCount:1}]), async (req,res,next) => {
+  try {
+    const title=String(req.body.title||'').trim().slice(0,100), description=String(req.body.description||'').trim().slice(0,2000), category=String(req.body.category||'Tools').trim().slice(0,40);
+    if(title.length<3) return res.status(400).json({error:'Der Titel muss mindestens 3 Zeichen haben.'});
+    const img=req.files?.image?.[0], file=req.files?.downloadFile?.[0], u=currentUser(req), status=u.role==='uploader'?'pending':'published';
+    const id=crypto.randomUUID();
+    await pool.query(`INSERT INTO resources(id,title,description,category,author,image_data,image_type,file_data,file_name,file_type,status)
+      VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)`,[id,title,description,category,u.username,img?.buffer||null,img?.mimetype||null,file?.buffer||null,file?.originalname||null,file?.mimetype||null,status]);
+    await logEvent(u.username,status==='pending'?'Upload zur Prüfung eingereicht':'Ressource veröffentlicht',title);
+    res.status(201).json({id,status});
+  } catch(err) { next(err); }
+});
+
+app.get('/api/admin/overview', requireRole('main','security'), async (_req,res,next) => {
+  try {
+    const [counts,visitor,latest]=await Promise.all([
+      pool.query("SELECT (SELECT count(*) FROM resources)::int AS resources,(SELECT count(*) FROM resources WHERE status='pending')::int AS pending,(SELECT count(*) FROM app_users)::int AS users"),
+      pool.query("SELECT value FROM app_settings WHERE key='visitors'"),
+      pool.query('SELECT id,username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 8')
+    ]);
+    res.json({stats:counts.rows[0],visitors:Number(visitor.rows[0]?.value||0),activity:latest.rows});
+  } catch(err) { next(err); }
+});
+app.get('/api/admin/users', requireRole('main'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT username,role,created_at FROM app_users ORDER BY created_at'); res.json(rows.map(publicUser)); } catch(err){next(err);} });
+app.post('/api/admin/users', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try {
+    const username=String(req.body.username||'').trim(), password=String(req.body.password||''), role=String(req.body.role||'uploader');
+    if(!/^[A-Za-z0-9_-]{3,24}$/.test(username)) return res.status(400).json({error:'Name: 3–24 Zeichen, Buchstaben, Zahlen, _ oder -.'});
+    if(password.length<12) return res.status(400).json({error:'Das Passwort muss mindestens 12 Zeichen haben.'});
+    if(!['security','uploader'].includes(role)) return res.status(400).json({error:'Diese Rolle kann hier nicht vergeben werden.'});
+    const hash=await bcrypt.hash(password,12); const {rows}=await pool.query('INSERT INTO app_users(username,password_hash,role) VALUES($1,$2,$3) RETURNING username,role,created_at',[username,hash,role]);
+    await logEvent(currentUser(req).username,'Konto erstellt',`${username} · ${role}`); res.status(201).json(publicUser(rows[0]));
+  } catch(err) { if(err.code==='23505') return res.status(409).json({error:'Dieser Nutzername ist schon vergeben.'}); next(err); }
+});
+app.delete('/api/admin/users/:username', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try {
+    const name=req.params.username;
+    if(name===currentUser(req).username) return res.status(400).json({error:'Das eigene Main-Admin-Konto kann hier nicht gelöscht werden.'});
+    const {rowCount}=await pool.query("DELETE FROM app_users WHERE username=$1 AND role <> 'main'",[name]);
+    if(!rowCount) return res.status(404).json({error:'Konto nicht gefunden oder geschützt.'});
+    await logEvent(currentUser(req).username,'Konto gelöscht',name,'warning'); res.json({ok:true});
+  } catch(err) { next(err); }
+});
+app.get('/api/admin/logs', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 200'); res.json(rows); } catch(err){next(err);} });
+app.get('/api/admin/resources', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT * FROM resources ORDER BY created_at DESC LIMIT 200'); res.json(rows.map(safeResource)); } catch(err){next(err);} });
+app.patch('/api/admin/resources/:id', requireRole('main','security'), requireCsrf, async (req,res,next) => {
+  try { const status=String(req.body.status||''); if(!['published','pending','rejected'].includes(status)) return res.status(400).json({error:'Ungültiger Status.'}); const {rows}=await pool.query('UPDATE resources SET status=$1 WHERE id=$2 RETURNING title',[status,req.params.id]); if(!rows[0]) return res.status(404).json({error:'Ressource nicht gefunden.'}); await logEvent(currentUser(req).username,'Ressourcenstatus geändert',`${rows[0].title} · ${status}`); res.json({ok:true}); }
+  catch(err){next(err);}
+});
+app.delete('/api/admin/resources/:id', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try { const {rows}=await pool.query('DELETE FROM resources WHERE id=$1 RETURNING title',[req.params.id]); if(!rows[0]) return res.status(404).json({error:'Ressource nicht gefunden.'}); await logEvent(currentUser(req).username,'Ressource gelöscht',rows[0].title,'warning'); res.json({ok:true}); }
+  catch(err){next(err);}
+});
+app.post('/api/admin/visitors', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try { const n=Number(req.body.value); if(!Number.isSafeInteger(n)||n<0||n>2147483647) return res.status(400).json({error:'Bitte eine Besucherzahl zwischen 0 und 2.147.483.647 eingeben.'}); await pool.query("UPDATE app_settings SET value=$1 WHERE key='visitors'",[String(n)]); await logEvent(currentUser(req).username,'Besucherzahl angepasst',String(n)); res.json({visitors:n}); }
+  catch(err){next(err);}
+});
+
+app.use(express.static(__dirname,{index:'index.html',maxAge:'1h'}));
+app.use('/api',(_req,res)=>res.status(404).json({error:'API-Endpunkt nicht gefunden.'}));
+app.use((err,_req,res,_next)=>{
+  console.error(err.message);
+  if(err instanceof multer.MulterError) return res.status(400).json({error:err.code==='LIMIT_FILE_SIZE'?'Dateien dürfen höchstens 20 MB groß sein.':'Upload konnte nicht verarbeitet werden.'});
+  res.status(500).json({error:'Serverfehler. Bitte später erneut versuchen.'});
+});
+
+init().then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Robo Uncopylocked läuft auf Port ${port}`))).catch(err=>{console.error('Serverstart fehlgeschlagen:',err.message);process.exit(1)});
