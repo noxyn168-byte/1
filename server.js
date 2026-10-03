@@ -83,6 +83,7 @@ async function logEvent(username, action, detail = '', level = 'info') {
   await pool.query('INSERT INTO activity_logs(username,action,detail,level) VALUES ($1,$2,$3,$4)', [String(username).slice(0,80), String(action).slice(0,120), String(detail).slice(0,500), level]);
 }
 function currentUser(req) { return req.session.user || null; }
+function berlinDate() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
 function requireAuth(req, res, next) { if (!currentUser(req)) return res.status(401).json({ error: 'Bitte zuerst anmelden.' }); next(); }
 function requireRole(...roles) { return (req,res,next) => !currentUser(req) ? res.status(401).json({error:'Bitte zuerst anmelden.'}) : !roles.includes(currentUser(req).role) ? res.status(403).json({error:'Keine Berechtigung.'}) : next(); }
 function requireCsrf(req,res,next) { if (!req.session.csrf || req.get('x-csrf-token') !== req.session.csrf) return res.status(403).json({error:'Sitzung abgelaufen. Bitte Seite neu laden.'}); next(); }
@@ -126,7 +127,7 @@ app.post('/api/visit', async (req,res,next) => {
 });
 app.get('/api/site-settings', async (_req,res,next) => {
   try {
-    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_hash','pause_until','pause_message','pause_seconds')");
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_hash','pause_until','pause_message','pause_seconds','daily_timer_date')");
     const settings=Object.fromEntries(rows.map(r=>[r.key,r.value]));
     const until=Date.parse(settings.pause_until||'');
     let logoHash=settings.logo_hash||'';
@@ -137,7 +138,7 @@ app.get('/api/site-settings', async (_req,res,next) => {
         await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_hash',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoHash]);
       }
     }
-    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoHash,pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3});
+    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoHash,pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3,dailyTimerUsed:settings.daily_timer_date===berlinDate()});
   } catch(err) { next(err); }
 });
 app.get('/api/site-logo', async (_req,res,next) => {
@@ -159,7 +160,7 @@ app.get('/api/resources/:id/image', async (req,res,next) => {
 });
 app.get('/api/resources/:id/download', async (req,res,next) => {
   try {
-    const {rows}=await pool.query("UPDATE resources SET downloads=downloads+1 WHERE id=$1 AND status='published' RETURNING file_data,file_type,file_name,title,author",[req.params.id]);
+    const {rows}=await pool.query("UPDATE resources SET downloads=downloads+1 WHERE id=$1 AND status='published' AND file_data IS NOT NULL RETURNING file_data,file_type,file_name,title,author",[req.params.id]);
     if(!rows[0]?.file_data) return res.status(404).send('Datei nicht gefunden.');
     await logEvent(currentUser(req)?.username || 'Besucher','Download',rows[0].title);
     const filename=String(rows[0].file_name||`${rows[0].title}.zip`).replace(/[^A-Za-z0-9_. -]/g,'_').slice(0,120);
@@ -228,6 +229,16 @@ app.patch('/api/admin/resources/:id', requireRole('main','security'), requireCsr
   try { const status=String(req.body.status||''); if(!['published','pending','rejected'].includes(status)) return res.status(400).json({error:'Ungültiger Status.'}); const {rows}=await pool.query('UPDATE resources SET status=$1 WHERE id=$2 RETURNING title',[status,req.params.id]); if(!rows[0]) return res.status(404).json({error:'Ressource nicht gefunden.'}); await logEvent(currentUser(req).username,'Ressourcenstatus geändert',`${rows[0].title} · ${status}`); res.json({ok:true}); }
   catch(err){next(err);}
 });
+app.put('/api/admin/resources/:id/downloads', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try {
+    const downloads=Number(req.body.downloads);
+    if(!Number.isSafeInteger(downloads)||downloads<0||downloads>2147483647) return res.status(400).json({error:'Bitte eine Zahl zwischen 0 und 2.147.483.647 eingeben.'});
+    const {rows}=await pool.query('UPDATE resources SET downloads=$1 WHERE id=$2 RETURNING title,downloads',[downloads,req.params.id]);
+    if(!rows[0]) return res.status(404).json({error:'Ressource nicht gefunden.'});
+    await logEvent(currentUser(req).username,'Downloadzahl angepasst',`${rows[0].title} · ${downloads}`);
+    res.json({ok:true,downloads:Number(rows[0].downloads)});
+  } catch(err){next(err);}
+});
 app.delete('/api/admin/resources/:id', requireRole('main'), requireCsrf, async (req,res,next) => {
   try { const {rows}=await pool.query('DELETE FROM resources WHERE id=$1 RETURNING title',[req.params.id]); if(!rows[0]) return res.status(404).json({error:'Ressource nicht gefunden.'}); await logEvent(currentUser(req).username,'Ressource gelöscht',rows[0].title,'warning'); res.json({ok:true}); }
   catch(err){next(err);}
@@ -238,11 +249,31 @@ app.post('/api/admin/visitors', requireRole('main'), requireCsrf, async (req,res
 });
 app.get('/api/admin/settings', requireRole('main'), async (_req,res,next) => {
   try {
-    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','pause_until','pause_message','pause_seconds')");
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','pause_until','pause_message','pause_seconds','daily_timer_date')");
     const s=Object.fromEntries(rows.map(r=>[r.key,r.value]));
     const until=Date.parse(s.pause_until||'');
-    res.json({siteName:s.site_name||'Robo Uncopylocked',accentColor:s.accent_color||'#b071ed',theme:s.site_theme==='black'?'black':'violet',hasLogo:Boolean(s.logo_data),logoData:s.logo_data||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseSeconds:Number(s.pause_seconds)||3,pauseMessage:s.pause_message||'Kurze technische Pause'});
+    res.json({siteName:s.site_name||'Robo Uncopylocked',accentColor:s.accent_color||'#b071ed',theme:s.site_theme==='black'?'black':'violet',hasLogo:Boolean(s.logo_data),logoData:s.logo_data||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseSeconds:Number(s.pause_seconds)||3,pauseMessage:s.pause_message||'Kurze technische Pause',dailyTimerUsed:s.daily_timer_date===berlinDate()});
   } catch(err) { next(err); }
+});
+app.post('/api/admin/daily-timer', requireRole('main'), requireCsrf, async (req,res,next) => {
+  const client=await pool.connect();
+  try {
+    const today=berlinDate();
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(714255,2)');
+    const {rows}=await client.query("SELECT key,value FROM app_settings WHERE key IN ('daily_timer_date','pause_until')");
+    const settings=Object.fromEntries(rows.map(row=>[row.key,row.value]));
+    if(settings.daily_timer_date===today) { await client.query('ROLLBACK'); return res.status(409).json({error:'Der Ein-Minuten-Timer wurde heute bereits verwendet.'}); }
+    const currentPause=Date.parse(settings.pause_until||'');
+    if(Number.isFinite(currentPause)&&currentPause>Date.now()) { await client.query('ROLLBACK'); return res.status(409).json({error:'Eine Pause läuft bereits. Bitte warte, bis sie beendet ist.'}); }
+    const until=new Date(Date.now()+60_000).toISOString();
+    const values={daily_timer_date:today,pause_until:until,pause_message:'Ein-Minuten-Timer',pause_seconds:'60'};
+    for(const [key,value] of Object.entries(values)) await client.query('INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value',[key,value]);
+    await client.query('COMMIT');
+    await logEvent(currentUser(req).username,'Ein-Minuten-Timer gestartet',today);
+    res.json({ok:true,pauseUntil:Date.parse(until),dailyTimerUsed:true});
+  } catch(err) { try{await client.query('ROLLBACK');}catch{} next(err); }
+  finally { client.release(); }
 });
 app.put('/api/admin/settings', requireRole('main'), requireCsrf, async (req,res,next) => {
   try {
