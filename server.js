@@ -62,11 +62,16 @@ async function init() {
     INSERT INTO app_settings(key,value) VALUES ('visitors','0') ON CONFLICT (key) DO NOTHING;
   `);
   const { rows } = await pool.query('SELECT count(*)::int AS n FROM app_users');
+  const name = process.env.BOOTSTRAP_ADMIN_USERNAME || 'admin';
   if (rows[0].n === 0) {
-    const name = process.env.BOOTSTRAP_ADMIN_USERNAME || 'admin';
     const hash = await bcrypt.hash(process.env.BOOTSTRAP_ADMIN_PASSWORD, 12);
     await pool.query('INSERT INTO app_users(username,password_hash,role) VALUES ($1,$2,$3)', [name, hash, 'main']);
     await logEvent(name, 'Main Admin angelegt', 'Erster sicherer Serverstart');
+  } else if (process.env.RESET_MAIN_PASSWORD_ONCE === '1') {
+    const hash = await bcrypt.hash(process.env.BOOTSTRAP_ADMIN_PASSWORD, 12);
+    const updated = await pool.query("UPDATE app_users SET password_hash=$1 WHERE lower(username)=lower($2) AND role='main'", [hash, name]);
+    if (!updated.rowCount) throw new Error('Main Admin could not be rotated');
+    await logEvent(name, 'Main-Admin-Passwort erneuert', 'Einmalige sichere Zugangsdatenrotation');
   }
 }
 
