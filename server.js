@@ -82,6 +82,9 @@ async function init() {
 async function logEvent(username, action, detail = '', level = 'info') {
   await pool.query('INSERT INTO activity_logs(username,action,detail,level) VALUES ($1,$2,$3,$4)', [String(username).slice(0,80), String(action).slice(0,120), String(detail).slice(0,500), level]);
 }
+async function removeExpiredLogs() {
+  await pool.query("DELETE FROM activity_logs WHERE created_at < now() - interval '10 minutes'");
+}
 function currentUser(req) { return req.session.user || null; }
 function berlinDate() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
 function heroImageKeys(slot) { return { data: `hero_${slot}_image_data`, hash: `hero_${slot}_image_hash` }; }
@@ -236,7 +239,7 @@ app.delete('/api/admin/users/:username', requireRole('main'), requireCsrf, async
   } catch(err) { try{await client.query('ROLLBACK');}catch{} next(err); }
   finally { client.release(); }
 });
-app.get('/api/admin/logs', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT id,username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 200'); res.json(rows); } catch(err){next(err);} });
+app.get('/api/admin/logs', requireRole('main','security'), async (_req,res,next) => { try { await removeExpiredLogs(); const {rows}=await pool.query('SELECT id,username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 200'); res.json(rows); } catch(err){next(err);} });
 app.delete('/api/admin/logs/:id', requireRole('main'), requireCsrf, async (req,res,next) => {
   try {
     const id=Number(req.params.id);
@@ -361,4 +364,8 @@ app.use((err,_req,res,_next)=>{
   res.status(500).json({error:'Serverfehler. Bitte später erneut versuchen.'});
 });
 
-init().then(()=>app.listen(port,'0.0.0.0',()=>console.log(`Robo Uncopylocked läuft auf Port ${port}`))).catch(err=>{console.error('Serverstart fehlgeschlagen:',err.message);process.exit(1)});
+init().then(()=>{
+  const logCleanup=setInterval(()=>removeExpiredLogs().catch(err=>console.error('Log-Bereinigung fehlgeschlagen:',err.message)),15_000);
+  logCleanup.unref();
+  return app.listen(port,'0.0.0.0',()=>console.log(`Robo Uncopylocked läuft auf Port ${port}`));
+}).catch(err=>{console.error('Serverstart fehlgeschlagen:',err.message);process.exit(1)});

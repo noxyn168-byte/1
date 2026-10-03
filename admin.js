@@ -1,7 +1,7 @@
 (() => {
   const $ = (s) => document.querySelector(s);
   const modal = $('#adminModal'), body = $('#adminBody');
-  let csrf = '', user = null, panelTab = 'overview', pauseDeadline = 0, pauseInterval = null, pauseDismissed = false;
+  let csrf = '', user = null, panelTab = 'overview', pauseDeadline = 0, pauseInterval = null, logCountdownInterval = null, pauseDismissed = false;
   const esc = (v) => String(v ?? '').replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   const roleName = { main:'Main Admin', security:'Sicherheitsadmin', uploader:'Uploader' };
   async function api(url, options={}) {
@@ -48,6 +48,7 @@
     return `<section class="admin-section"><h3>Neue Ressource hochladen</h3><form id="uploadForm" class="admin-form" enctype="multipart/form-data"><label>Titel<input name="title" required minlength="3" maxlength="100" placeholder="Name des Projekts"></label><label>Beschreibung<textarea name="description" maxlength="2000" placeholder="Was ist enthalten? Credits und Nutzungshinweise nicht vergessen."></textarea></label><label>Kategorie<select name="category"><option>Maps</option><option>Modelle</option><option>UI Kits</option><option>Tools</option></select></label><label>Vorschaubild<input name="image" type="file" accept="image/png,image/jpeg,image/webp,image/gif"></label><label>Download-Datei<input name="downloadFile" type="file" accept=".zip,.rbxm,.rbxl,.rbxmx,.rbxlx,.glb,.gltf"></label><small class="form-note">Bilder und Dateien bis 20 MB. Uploader-Einsendungen müssen vor der Veröffentlichung geprüft werden.</small><div class="admin-message" id="uploadMessage"></div><button class="button button-primary">Hochladen</button></form></section>`;
   }
   async function renderPanel() {
+    if(logCountdownInterval){clearInterval(logCountdownInterval);logCountdownInterval=null;}
     if(!user) return renderLogin();
     const main=user.role==='main', security=user.role==='security';
     const tabs=[['overview','Übersicht'],['upload','Upload']];
@@ -94,9 +95,23 @@
         document.querySelectorAll('[data-delete-resource]').forEach(b=>b.onclick=async()=>{if(!confirm('Ressource endgültig löschen?'))return;try{await api(`/api/admin/resources/${b.dataset.deleteResource}`,{method:'DELETE'});toast('Ressource gelöscht.');renderPanel();loadResources();}catch(err){toast(err.message);}});
       } catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;} return;
     }
-    if(panelTab==='logs') {try{const rows=await api('/api/admin/logs');content.innerHTML=`<section class="admin-section"><h3>Sicherheits- und Aktivitätslogs</h3>${main?'<p class="settings-note">Nur Main Admins können Logeinträge löschen.</p>':''}${activityRows(rows,main)}</section>`;document.querySelectorAll('[data-delete-log]').forEach(button=>button.onclick=async()=>{if(!confirm('Diesen Logeintrag wirklich löschen?'))return;try{await api(`/api/admin/logs/${encodeURIComponent(button.dataset.deleteLog)}`,{method:'DELETE'});toast('Logeintrag gelöscht.');renderPanel();}catch(err){toast(err.message);}});}catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;}}
+    if(panelTab==='logs') {try{const rows=await api('/api/admin/logs');content.innerHTML=`<section class="admin-section"><h3>Sicherheits- und Aktivitätslogs</h3><p class="settings-note">Jeder Eintrag zeigt die verbleibende Zeit bis zur automatischen Löschung nach zehn Minuten.${main?' Nur Main Admins können sie zusätzlich manuell löschen.':''}</p>${activityRows(rows,main,true)}</section>`;updateLogCountdowns();logCountdownInterval=setInterval(updateLogCountdowns,1000);document.querySelectorAll('[data-delete-log]').forEach(button=>button.onclick=async()=>{if(!confirm('Diesen Logeintrag wirklich löschen?'))return;try{await api(`/api/admin/logs/${encodeURIComponent(button.dataset.deleteLog)}`,{method:'DELETE'});toast('Logeintrag gelöscht.');renderPanel();}catch(err){toast(err.message);}});}catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;}}
   }
-  function activityRows(rows,deletable=false) {return `<div class="admin-list">${rows.length?rows.map(a=>`<div class="admin-row"><span><b>${esc(a.action)}</b><small>${esc(a.username)} · ${esc(a.detail||'')} · ${new Date(a.created_at).toLocaleString('de-DE')}</small></span><span class="role-tag">${esc(a.level||'info')}</span>${deletable?`<button class="button danger small" data-delete-log="${Number(a.id)}">Löschen</button>`:''}</div>`).join(''):'<p class="form-note">Noch keine Einträge.</p>'}</div>`;}
+  function activityRows(rows,deletable=false,showCountdown=false) {return `<div class="admin-list" data-log-list>${rows.length?rows.map(a=>`<div class="admin-row" data-log-row><span><b>${esc(a.action)}</b><small>${esc(a.username)} · ${esc(a.detail||'')} · ${new Date(a.created_at).toLocaleString('de-DE')}${showCountdown?` · <span data-log-countdown data-log-expires="${Date.parse(a.created_at)+600000}"></span>`:''}</small></span><span class="role-tag">${esc(a.level||'info')}</span>${deletable?`<button class="button danger small" data-delete-log="${Number(a.id)}">Löschen</button>`:''}</div>`).join(''):'<p class="form-note">Keine Logs vorhanden. Neue Einträge erscheinen hier, sobald wieder Aktivitäten stattfinden.</p>'}</div>`;}
+  function updateLogCountdowns() {
+    const list=$('[data-log-list]');
+    if(!list)return;
+    list.querySelectorAll('[data-log-countdown]').forEach(clock=>{
+      const remaining=Number(clock.dataset.logExpires)-Date.now();
+      if(!Number.isFinite(remaining)||remaining<=0){clock.closest('[data-log-row]')?.remove();return;}
+      const seconds=Math.ceil(remaining/1000);
+      clock.textContent=`wird gelöscht in ${Math.floor(seconds/60)}:${String(seconds%60).padStart(2,'0')}`;
+    });
+    if(!list.querySelector('[data-log-row]')){
+      list.innerHTML='<p class="form-note">Keine Logs vorhanden. Neue Einträge erscheinen hier, sobald wieder Aktivitäten stattfinden.</p>';
+      if(logCountdownInterval){clearInterval(logCountdownInterval);logCountdownInterval=null;}
+    }
+  }
   function bindUpload() {
     $('#uploadForm').onsubmit=async e=>{e.preventDefault();const button=e.currentTarget.querySelector('button');button.disabled=true;try{const result=await api('/api/resources',{method:'POST',body:new FormData(e.currentTarget)});toast(result.status==='pending'?'Zur Prüfung eingereicht.':'Ressource veröffentlicht.');e.currentTarget.reset();if(result.status==='published')loadResources();panelTab='overview';renderPanel();}catch(err){$('#uploadMessage').textContent=err.message;}finally{button.disabled=false;}};
   }
