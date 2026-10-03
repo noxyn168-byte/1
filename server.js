@@ -223,7 +223,16 @@ app.delete('/api/admin/users/:username', requireRole('main'), requireCsrf, async
   } catch(err) { try{await client.query('ROLLBACK');}catch{} next(err); }
   finally { client.release(); }
 });
-app.get('/api/admin/logs', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 200'); res.json(rows); } catch(err){next(err);} });
+app.get('/api/admin/logs', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT id,username,action,detail,level,created_at FROM activity_logs ORDER BY id DESC LIMIT 200'); res.json(rows); } catch(err){next(err);} });
+app.delete('/api/admin/logs/:id', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try {
+    const id=Number(req.params.id);
+    if(!Number.isSafeInteger(id)||id<1) return res.status(400).json({error:'Ungültiger Logeintrag.'});
+    const {rowCount}=await pool.query('DELETE FROM activity_logs WHERE id=$1',[id]);
+    if(!rowCount) return res.status(404).json({error:'Logeintrag nicht gefunden.'});
+    res.json({ok:true});
+  } catch(err){next(err);}
+});
 app.get('/api/admin/resources', requireRole('main','security'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT * FROM resources ORDER BY created_at DESC LIMIT 200'); res.json(rows.map(safeResource)); } catch(err){next(err);} });
 app.patch('/api/admin/resources/:id', requireRole('main','security'), requireCsrf, async (req,res,next) => {
   try { const status=String(req.body.status||''); if(!['published','pending','rejected'].includes(status)) return res.status(400).json({error:'Ungültiger Status.'}); const {rows}=await pool.query('UPDATE resources SET status=$1 WHERE id=$2 RETURNING title',[status,req.params.id]); if(!rows[0]) return res.status(404).json({error:'Ressource nicht gefunden.'}); await logEvent(currentUser(req).username,'Ressourcenstatus geändert',`${rows[0].title} · ${status}`); res.json({ok:true}); }
