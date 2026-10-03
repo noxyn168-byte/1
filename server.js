@@ -84,6 +84,7 @@ async function logEvent(username, action, detail = '', level = 'info') {
 }
 function currentUser(req) { return req.session.user || null; }
 function berlinDate() { return new Intl.DateTimeFormat('en-CA', { timeZone: 'Europe/Berlin', year: 'numeric', month: '2-digit', day: '2-digit' }).format(new Date()); }
+function heroImageKeys(slot) { return { data: `hero_${slot}_image_data`, hash: `hero_${slot}_image_hash` }; }
 function requireAuth(req, res, next) { if (!currentUser(req)) return res.status(401).json({ error: 'Bitte zuerst anmelden.' }); next(); }
 function requireRole(...roles) { return (req,res,next) => !currentUser(req) ? res.status(401).json({error:'Bitte zuerst anmelden.'}) : !roles.includes(currentUser(req).role) ? res.status(403).json({error:'Keine Berechtigung.'}) : next(); }
 function requireCsrf(req,res,next) { if (!req.session.csrf || req.get('x-csrf-token') !== req.session.csrf) return res.status(403).json({error:'Sitzung abgelaufen. Bitte Seite neu laden.'}); next(); }
@@ -127,7 +128,7 @@ app.post('/api/visit', async (req,res,next) => {
 });
 app.get('/api/site-settings', async (_req,res,next) => {
   try {
-    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_hash','pause_until','pause_message','pause_seconds','daily_timer_date')");
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_hash','pause_until','pause_message','pause_seconds','daily_timer_date','hero_featured_image_hash','hero_studio_image_hash')");
     const settings=Object.fromEntries(rows.map(r=>[r.key,r.value]));
     const until=Date.parse(settings.pause_until||'');
     let logoHash=settings.logo_hash||'';
@@ -138,7 +139,7 @@ app.get('/api/site-settings', async (_req,res,next) => {
         await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_hash',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoHash]);
       }
     }
-    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoHash,pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3,dailyTimerUsed:settings.daily_timer_date===berlinDate()});
+    res.json({siteName:settings.site_name||'Robo Uncopylocked',accentColor:settings.accent_color||'#b071ed',theme:settings.site_theme==='black'?'black':'violet',logoHash,heroFeaturedImageHash:settings.hero_featured_image_hash||'',heroStudioImageHash:settings.hero_studio_image_hash||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseUntil:Number.isFinite(until)&&until>Date.now()?until:null,pauseMessage:settings.pause_message||'Kurze technische Pause',pauseSeconds:Number(settings.pause_seconds)||3,dailyTimerUsed:settings.daily_timer_date===berlinDate()});
   } catch(err) { next(err); }
 });
 app.get('/api/site-logo', async (_req,res,next) => {
@@ -146,6 +147,18 @@ app.get('/api/site-logo', async (_req,res,next) => {
     const {rows}=await pool.query("SELECT value FROM app_settings WHERE key='logo_data'");
     const match=/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(rows[0]?.value||'');
     if(!match) return res.redirect('/robo-logo.png');
+    const hash=crypto.createHash('sha256').update(rows[0].value).digest('hex').slice(0,16);
+    res.set('Cache-Control','public,max-age=3600').set('ETag',`"${hash}"`).type(match[1]).send(Buffer.from(match[2],'base64'));
+  } catch(err) { next(err); }
+});
+app.get('/api/site-image/:slot', async (req,res,next) => {
+  try {
+    const slot=String(req.params.slot||'');
+    if(!['featured','studio'].includes(slot)) return res.sendStatus(404);
+    const keys=heroImageKeys(slot);
+    const {rows}=await pool.query('SELECT value FROM app_settings WHERE key=$1',[keys.data]);
+    const match=/^data:(image\/(?:png|jpeg|webp|gif));base64,([A-Za-z0-9+/=]+)$/.exec(rows[0]?.value||'');
+    if(!match) return res.sendStatus(404);
     const hash=crypto.createHash('sha256').update(rows[0].value).digest('hex').slice(0,16);
     res.set('Cache-Control','public,max-age=3600').set('ETag',`"${hash}"`).type(match[1]).send(Buffer.from(match[2],'base64'));
   } catch(err) { next(err); }
@@ -258,10 +271,10 @@ app.post('/api/admin/visitors', requireRole('main'), requireCsrf, async (req,res
 });
 app.get('/api/admin/settings', requireRole('main'), async (_req,res,next) => {
   try {
-    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','pause_until','pause_message','pause_seconds','daily_timer_date')");
+    const {rows}=await pool.query("SELECT key,value FROM app_settings WHERE key IN ('site_name','accent_color','site_theme','logo_data','hero_featured_image_data','hero_studio_image_data','hero_featured_image_hash','hero_studio_image_hash','pause_until','pause_message','pause_seconds','daily_timer_date')");
     const s=Object.fromEntries(rows.map(r=>[r.key,r.value]));
     const until=Date.parse(s.pause_until||'');
-    res.json({siteName:s.site_name||'Robo Uncopylocked',accentColor:s.accent_color||'#b071ed',theme:s.site_theme==='black'?'black':'violet',hasLogo:Boolean(s.logo_data),logoData:s.logo_data||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseSeconds:Number(s.pause_seconds)||3,pauseMessage:s.pause_message||'Kurze technische Pause',dailyTimerUsed:s.daily_timer_date===berlinDate()});
+    res.json({siteName:s.site_name||'Robo Uncopylocked',accentColor:s.accent_color||'#b071ed',theme:s.site_theme==='black'?'black':'violet',hasLogo:Boolean(s.logo_data),logoData:s.logo_data||'',heroFeaturedImageData:s.hero_featured_image_data||'',heroFeaturedImageHash:s.hero_featured_image_hash||'',heroStudioImageData:s.hero_studio_image_data||'',heroStudioImageHash:s.hero_studio_image_hash||'',pauseActive:Number.isFinite(until)&&until>Date.now(),pauseSeconds:Number(s.pause_seconds)||3,pauseMessage:s.pause_message||'Kurze technische Pause',dailyTimerUsed:s.daily_timer_date===berlinDate()});
   } catch(err) { next(err); }
 });
 app.post('/api/admin/daily-timer', requireRole('main'), requireCsrf, async (req,res,next) => {
@@ -312,6 +325,30 @@ app.post('/api/admin/settings/logo', requireRole('main'), requireCsrf, upload.si
     await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_data',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoData]);
     await pool.query("INSERT INTO app_settings(key,value) VALUES('logo_hash',$1) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value",[logoHash]);
     await logEvent(currentUser(req).username,'Webseitenlogo geändert',req.file.originalname.slice(0,120));
+    res.json({ok:true});
+  } catch(err) { next(err); }
+});
+app.post('/api/admin/settings/hero-image/:slot', requireRole('main'), requireCsrf, upload.single('image'), async (req,res,next) => {
+  try {
+    const slot=String(req.params.slot||'');
+    if(!['featured','studio'].includes(slot)) return res.status(404).json({error:'Bildbereich nicht gefunden.'});
+    if(!req.file) return res.status(400).json({error:'Bitte ein Bild auswählen.'});
+    if(req.file.size>5*1024*1024) return res.status(400).json({error:'Das Bild darf höchstens 5 MB groß sein.'});
+    const keys=heroImageKeys(slot);
+    const imageData=`data:${req.file.mimetype};base64,${req.file.buffer.toString('base64')}`;
+    const imageHash=crypto.createHash('sha256').update(imageData).digest('hex').slice(0,16);
+    await Promise.all([[keys.data,imageData],[keys.hash,imageHash]].map(([key,value])=>pool.query('INSERT INTO app_settings(key,value) VALUES($1,$2) ON CONFLICT(key) DO UPDATE SET value=EXCLUDED.value',[key,value])));
+    await logEvent(currentUser(req).username,'Website-Bild geändert',`${slot} · ${req.file.originalname.slice(0,120)}`);
+    res.json({ok:true,imageHash});
+  } catch(err) { next(err); }
+});
+app.delete('/api/admin/settings/hero-image/:slot', requireRole('main'), requireCsrf, async (req,res,next) => {
+  try {
+    const slot=String(req.params.slot||'');
+    if(!['featured','studio'].includes(slot)) return res.status(404).json({error:'Bildbereich nicht gefunden.'});
+    const keys=heroImageKeys(slot);
+    await pool.query('DELETE FROM app_settings WHERE key=ANY($1::text[])',[[keys.data,keys.hash]]);
+    await logEvent(currentUser(req).username,'Website-Bild zurückgesetzt',slot);
     res.json({ok:true});
   } catch(err) { next(err); }
 });
