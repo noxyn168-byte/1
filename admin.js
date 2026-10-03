@@ -98,5 +98,5 @@
   $('#closeAdmin').addEventListener('click',closeModal);
   modal.addEventListener('click',e=>{if(e.target===modal)closeModal();});
   document.addEventListener('keydown',e=>{if(e.key==='Escape'&&user?.role==='main'&&!$('#pauseScreen').classList.contains('hidden')){pauseDismissed=true;$('#pauseScreen').classList.add('hidden');if(pauseInterval)clearInterval(pauseInterval);pauseInterval=null;return;}if(e.key==='Escape')closeModal();});
-  (async()=>{try{const auth=await api('/api/auth');user=auth.user;csrf=auth.csrf;await refreshCounters();}catch{}await loadSiteSettings();await loadResources();})();
+  (async()=>{try{const auth=await api('/api/auth');user=auth.user;csrf=auth.csrf;await refreshCounters();}catch{}await loadSiteSettings();await loadResources();setInterval(()=>{if(!document.hidden)loadSiteSettings();},1200);})();
 })();
