@@ -206,6 +206,19 @@ app.get('/api/admin/overview', requireRole('main','security'), async (_req,res,n
     res.json({stats:counts.rows[0],visitors:Number(visitor.rows[0]?.value||0),activity:latest.rows});
   } catch(err) { next(err); }
 });
+app.get('/api/admin/jarvis', requireRole('main'), async (_req,res,next) => {
+  try {
+    await removeExpiredLogs();
+    const [counts,visitor,users,resources,activity]=await Promise.all([
+      pool.query("SELECT count(*)::int AS resources,count(*) FILTER (WHERE status='published')::int AS published,count(*) FILTER (WHERE status='pending')::int AS pending,count(*) FILTER (WHERE status='rejected')::int AS rejected,COALESCE(sum(downloads),0)::text AS downloads FROM resources"),
+      pool.query("SELECT value FROM app_settings WHERE key='visitors'"),
+      pool.query('SELECT role,count(*)::int AS total FROM app_users GROUP BY role'),
+      pool.query('SELECT title,status,downloads FROM resources ORDER BY downloads DESC,created_at DESC LIMIT 100'),
+      pool.query('SELECT username,action,detail,created_at FROM activity_logs ORDER BY id DESC LIMIT 5')
+    ]);
+    res.json({stats:{...counts.rows[0],downloads:Number(counts.rows[0].downloads)},visitors:Number(visitor.rows[0]?.value||0),usersByRole:Object.fromEntries(users.rows.map(row=>[row.role,row.total])),resources:resources.rows.map(row=>({...row,downloads:Number(row.downloads)})),activity:activity.rows});
+  } catch(err) { next(err); }
+});
 app.get('/api/admin/users', requireRole('main'), async (_req,res,next) => { try { const {rows}=await pool.query('SELECT username,role,created_at FROM app_users ORDER BY created_at'); res.json(rows.map(publicUser)); } catch(err){next(err);} });
 app.post('/api/admin/users', requireRole('main'), requireCsrf, async (req,res,next) => {
   try {

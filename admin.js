@@ -52,6 +52,7 @@
     if(!user) return renderLogin();
     const main=user.role==='main', security=user.role==='security';
     const tabs=[['overview','Übersicht'],['upload','Upload']];
+    if(main) tabs.unshift(['jarvis','Jarvis']);
     if(main) tabs.push(['accounts','Konten & Upload-Zugänge'],['settings','Website gestalten']);
     if(main||security) tabs.push(['review','Prüfung'],['logs','Logs']);
     if(!tabs.some(t=>t[0]===panelTab)) panelTab='overview';
@@ -59,6 +60,13 @@
     $('#logoutBtn').onclick=async()=>{try{await api('/api/logout',{method:'POST',body:'{}'});}catch{}user=null;const auth=await api('/api/auth');csrf=auth.csrf;renderLogin();toast('Abgemeldet.');};
     document.querySelectorAll('[data-tab]').forEach(b=>b.onclick=()=>{panelTab=b.dataset.tab;renderPanel();});
     const content=$('#panelContent');
+    if(panelTab==='jarvis') {
+      content.innerHTML=`<section class="admin-section jarvis-panel"><div class="jarvis-heading"><div class="jarvis-orb" aria-hidden="true">J</div><div><h3>Jarvis</h3><p>Dein Website-Assistent</p></div></div><div class="jarvis-messages" id="jarvisMessages" aria-live="polite"><div class="jarvis-message jarvis-answer"><b>Jarvis</b><p>Hallo Boss! Frag mich nach Besuchern, Ressourcen, Downloads, Konten oder den letzten Aktivitäten.</p></div></div><form class="jarvis-form" id="jarvisAskForm"><label for="jarvisQuestion">Deine Frage</label><div><input id="jarvisQuestion" name="question" maxlength="240" required placeholder="Wie viele Leute waren auf unserer Webseite?"><button class="button button-primary" type="submit">Fragen</button></div></form><p class="settings-note">Besucherzahlen zählen Sitzungen auf der Webseite. Einzelne Klicks auf externe Links werden derzeit nicht separat erfasst.</p></section>`;
+      const messages=$('#jarvisMessages'), form=$('#jarvisAskForm'), button=form.querySelector('button');
+      const addMessage=(kind,name,text)=>{const item=document.createElement('div');item.className=`jarvis-message ${kind}`;const label=document.createElement('b');label.textContent=name;const reply=document.createElement('p');reply.textContent=text;item.append(label,reply);messages.append(item);messages.scrollTop=messages.scrollHeight;};
+      form.onsubmit=async e=>{e.preventDefault();const question=new FormData(form).get('question').trim();if(!question)return;addMessage('jarvis-question','Du',question);form.elements.question.value='';button.disabled=true;button.textContent='…';try{const data=await api('/api/admin/jarvis');addMessage('jarvis-answer','Jarvis',answerJarvis(question,data));}catch(err){addMessage('jarvis-answer','Jarvis',`Ich kann die Website-Daten gerade nicht laden. ${err.message}`);}finally{button.disabled=false;button.textContent='Fragen';form.elements.question.focus();}};
+      form.elements.question.focus();return;
+    }
     if(panelTab==='upload') {content.innerHTML=formUpload();bindUpload();return;}
     if(panelTab==='overview') {
       if(user.role==='uploader') {content.innerHTML=`<section class="admin-section"><h3>Willkommen</h3><p class="form-note">Dein Konto kann Ressourcen einreichen. Veröffentlichungen werden von einem Admin geprüft.</p><button class="button button-primary" id="goUpload">＋ Ressource einreichen</button></section>`;$('#goUpload').onclick=()=>{panelTab='upload';renderPanel();};return;}
@@ -98,6 +106,25 @@
     if(panelTab==='logs') {try{const rows=await api('/api/admin/logs');content.innerHTML=`<section class="admin-section"><h3>Sicherheits- und Aktivitätslogs</h3><p class="settings-note">Jeder Eintrag zeigt die verbleibende Zeit bis zur automatischen Löschung nach zehn Minuten.${main?' Nur Main Admins können sie zusätzlich manuell löschen.':''}</p>${activityRows(rows,main,true)}</section>`;updateLogCountdowns();logCountdownInterval=setInterval(updateLogCountdowns,1000);document.querySelectorAll('[data-delete-log]').forEach(button=>button.onclick=async()=>{if(!confirm('Diesen Logeintrag wirklich löschen?'))return;try{await api(`/api/admin/logs/${encodeURIComponent(button.dataset.deleteLog)}`,{method:'DELETE'});toast('Logeintrag gelöscht.');renderPanel();}catch(err){toast(err.message);}});}catch(err){content.innerHTML=`<p class="admin-message">${esc(err.message)}</p>`;}}
   }
   function activityRows(rows,deletable=false,showCountdown=false) {return `<div class="admin-list" data-log-list>${rows.length?rows.map(a=>`<div class="admin-row" data-log-row><span><b>${esc(a.action)}</b><small>${esc(a.username)} · ${esc(a.detail||'')} · ${new Date(a.created_at).toLocaleString('de-DE')}${showCountdown?` · <span data-log-countdown data-log-expires="${Date.parse(a.created_at)+600000}"></span>`:''}</small></span><span class="role-tag">${esc(a.level||'info')}</span>${deletable?`<button class="button danger small" data-delete-log="${Number(a.id)}">Löschen</button>`:''}</div>`).join(''):'<p class="form-note">Keine Logs vorhanden. Neue Einträge erscheinen hier, sobald wieder Aktivitäten stattfinden.</p>'}</div>`;}
+  function jarvisText(value) {return String(value||'').toLowerCase().replace(/ß/g,'ss').normalize('NFD').replace(/[\u0300-\u036f]/g,'');}
+  function answerJarvis(question,data) {
+    const q=jarvisText(question),stats=data.stats||{},roles=data.usersByRole||{},resources=data.resources||[];
+    if(/besuch|geklick|klick|join|drauf|link|traffic/.test(q)) return `Hallo Boss! Die Besucheranzeige steht bei ${Number(data.visitors||0).toLocaleString('de-DE')}. Sie zählt Besuche pro Sitzung. Einzelne Klicks auf einen bestimmten Link werden nicht separat gezählt.`;
+    if(/download/.test(q)) {
+      const resource=resources.find(item=>q.includes(jarvisText(item.title)));
+      if(resource)return `Hallo Boss! „${resource.title}“ wurde ${Number(resource.downloads).toLocaleString('de-DE')} Mal heruntergeladen.`;
+      const top=resources.slice(0,3).map(item=>`${item.title} (${Number(item.downloads).toLocaleString('de-DE')})`).join(', ');
+      return `Hallo Boss! Insgesamt wurden Ressourcen ${Number(stats.downloads||0).toLocaleString('de-DE')} Mal heruntergeladen.${top?` Am häufigsten: ${top}.`:''}`;
+    }
+    if(/konto|konten|nutzer|user|admin|uploader/.test(q))return `Hallo Boss! Es gibt ${Number(stats.users||Object.values(roles).reduce((sum,n)=>sum+Number(n||0),0)).toLocaleString('de-DE')} Konten: ${Number(roles.main||0)} Main Admins, ${Number(roles.security||0)} Sicherheitsadmins und ${Number(roles.uploader||0)} Uploader.`;
+    if(/log|aktivitaet|passiert|zuletzt/.test(q)) {
+      const recent=data.activity||[];
+      if(!recent.length)return 'Hallo Boss! Es gibt gerade keine gespeicherten Aktivitäten. Logs werden nach zehn Minuten automatisch gelöscht.';
+      return `Hallo Boss! Die letzten Aktivitäten: ${recent.map(item=>`${item.action}${item.detail?` (${item.detail})`:''}`).join('; ')}. Logs werden nach zehn Minuten automatisch gelöscht.`;
+    }
+    if(/ressource|modell|upload|projekt|pruef|veroeffentlich/.test(q))return `Hallo Boss! Es gibt ${Number(stats.resources||0)} Ressourcen: ${Number(stats.published||0)} veröffentlicht, ${Number(stats.pending||0)} warten auf Prüfung und ${Number(stats.rejected||0)} wurden abgelehnt.`;
+    return `Hallo Boss! Ich kann dir die Besucheranzeige, Downloads, Ressourcen, Konten und letzten Aktivitäten nennen. Frag zum Beispiel: „Wie viele Besucher hatten wir?“ oder „Wie viele Downloads hat ${resources[0]?.title||'ein Modell'}?“`;
+  }
   function updateLogCountdowns() {
     const list=$('[data-log-list]');
     if(!list)return;
