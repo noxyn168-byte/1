@@ -38,3 +38,67 @@
   <script src="admin.js?v=13" defer></script>
 </body>
 </html>
+<script>
+(() => {
+  const installBulkDownloadSave = () => {
+    const adminBody = document.querySelector('#adminBody');
+    if (!adminBody) return;
+    const section = [...adminBody.querySelectorAll('section')].find(item => item.querySelector('h3')?.textContent.includes('Ressourcen und Downloadzahlen'));
+    const list = section?.querySelector('.admin-list');
+    if (!list || section.querySelector('#saveAllDownloadCounts')) return;
+    const forms = [...list.querySelectorAll('form')];
+    if (!forms.length) return;
+    const bar = document.createElement('div');
+    bar.style.cssText = 'display:flex;align-items:center;gap:12px;flex-wrap:wrap;margin:12px 0 16px';
+    const button = document.createElement('button');
+    button.id = 'saveAllDownloadCounts';
+    button.type = 'button';
+    button.className = 'button button-primary';
+    button.textContent = 'Alle Änderungen speichern';
+    const status = document.createElement('span');
+    status.setAttribute('aria-live', 'polite');
+    status.className = 'form-note';
+    bar.append(button, status);
+    list.before(bar);
+    button.addEventListener('click', async () => {
+      const pending = forms.map(form => ({ form, input: form.querySelector('input[type="number"]') }))
+        .filter(item => item.input && Number(item.input.value) !== Number(item.form.dataset.originalDownloads ?? item.input.defaultValue));
+      if (pending.some(item => !item.input.reportValidity())) return;
+      if (!pending.length) { status.textContent = 'Keine offenen Änderungen.'; return; }
+      button.disabled = true;
+      button.textContent = 'Speichere…';
+      status.textContent = '';
+      let saved = 0;
+      try {
+        const authResponse = await fetch('/api/auth', { credentials: 'same-origin' });
+        const auth = await authResponse.json();
+        if (!authResponse.ok || !auth.csrf) throw new Error('Anmeldung konnte nicht bestätigt werden.');
+        for (const item of pending) {
+          const value = Number(item.input.value);
+          const response = await fetch('/api/admin/resources/' + encodeURIComponent(item.form.dataset.downloadForm) + '/downloads', {
+            method: 'PUT', credentials: 'same-origin',
+            headers: { 'Content-Type': 'application/json', 'x-csrf-token': auth.csrf },
+            body: JSON.stringify({ downloads: value })
+          });
+          const result = await response.json().catch(() => ({}));
+          if (!response.ok) throw new Error(result.error || 'Eine Downloadzahl konnte nicht gespeichert werden.');
+          item.form.dataset.originalDownloads = String(value);
+          item.input.defaultValue = String(value);
+          item.input.setAttribute('value', String(value));
+          const details = item.form.closest('.admin-row')?.querySelector('small');
+          if (details) details.textContent = details.textContent.replace(/[\d.,]+(?= tatsächliche Downloads)/, value.toLocaleString('de-DE'));
+          saved++;
+        }
+        status.textContent = saved + ' Downloadzahlen gespeichert.';
+      } catch (error) {
+        status.textContent = saved + ' gespeichert. ' + (pending.length - saved) + ' fehlgeschlagen: ' + error.message;
+      } finally {
+        button.disabled = false;
+        button.textContent = 'Alle Änderungen speichern';
+      }
+    });
+  };
+  installBulkDownloadSave();
+  new MutationObserver(installBulkDownloadSave).observe(document.querySelector('#adminBody') || document.body, { childList: true, subtree: true });
+})();
+</script>
